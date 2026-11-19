@@ -31,6 +31,7 @@ namespace OpenRA.Mods.Cnc.Graphics
 		readonly PaletteReference normalsPalette;
 		readonly PaletteReference shadowPalette;
 		readonly float scale;
+		readonly WDist depthOffset;
 
 		public ModelRenderable(
 			ModelRenderer renderer, IEnumerable<ModelAnimation> models, WPos pos, int zOffset, in WRot camera, float scale,
@@ -46,7 +47,7 @@ namespace OpenRA.Mods.Cnc.Graphics
 			ModelRenderer renderer, IEnumerable<ModelAnimation> models, WPos pos, int zOffset, in WRot camera, float scale,
 			in WRot lightSource, ImmutableArray<float> lightAmbientColor, ImmutableArray<float> lightDiffuseColor,
 			PaletteReference color, PaletteReference normals, PaletteReference shadow,
-			float alpha, in Vector3 tint, TintModifiers tintModifiers)
+			float alpha, in Vector3 tint, TintModifiers tintModifiers, WDist depthOffset = default)
 		{
 			this.renderer = renderer;
 			this.models = models;
@@ -63,6 +64,7 @@ namespace OpenRA.Mods.Cnc.Graphics
 			Alpha = alpha;
 			Tint = tint;
 			TintModifiers = tintModifiers;
+			this.depthOffset = depthOffset;
 		}
 
 		public WPos Pos { get; }
@@ -79,7 +81,7 @@ namespace OpenRA.Mods.Cnc.Graphics
 			return new ModelRenderable(
 				renderer, models, Pos, ZOffset, camera, scale,
 				lightSource, lightAmbientColor, lightDiffuseColor,
-				newPalette, normalsPalette, shadowPalette, Alpha, Tint, TintModifiers);
+				newPalette, normalsPalette, shadowPalette, Alpha, Tint, TintModifiers, depthOffset);
 		}
 
 		public IRenderable WithZOffset(int newOffset)
@@ -87,7 +89,7 @@ namespace OpenRA.Mods.Cnc.Graphics
 			return new ModelRenderable(
 				renderer, models, Pos, newOffset, camera, scale,
 				lightSource, lightAmbientColor, lightDiffuseColor,
-				Palette, normalsPalette, shadowPalette, Alpha, Tint, TintModifiers);
+				Palette, normalsPalette, shadowPalette, Alpha, Tint, TintModifiers, depthOffset);
 		}
 
 		public IRenderable OffsetBy(in WVec vec)
@@ -95,17 +97,29 @@ namespace OpenRA.Mods.Cnc.Graphics
 			return new ModelRenderable(
 				renderer, models, Pos + vec, ZOffset, camera, scale,
 				lightSource, lightAmbientColor, lightDiffuseColor,
-				Palette, normalsPalette, shadowPalette, Alpha, Tint, TintModifiers);
+				Palette, normalsPalette, shadowPalette, Alpha, Tint, TintModifiers, depthOffset);
 		}
 
 		public IRenderable AsDecoration() { return this; }
+
+		/// <summary>
+		/// Draws the model this much nearer the camera without moving it on screen or moving its shadow,
+		/// e.g. to keep a flying actor in front of the buildings it passes over.
+		/// </summary>
+		public ModelRenderable WithDepthOffset(WDist offset)
+		{
+			return new ModelRenderable(
+				renderer, models, Pos, ZOffset, camera, scale,
+				lightSource, lightAmbientColor, lightDiffuseColor,
+				Palette, normalsPalette, shadowPalette, Alpha, Tint, TintModifiers, offset);
+		}
 
 		public IModifyableRenderable WithAlpha(float newAlpha)
 		{
 			return new ModelRenderable(
 				renderer, models, Pos, ZOffset, camera, scale,
 				lightSource, lightAmbientColor, lightDiffuseColor,
-				Palette, normalsPalette, shadowPalette, newAlpha, Tint, TintModifiers);
+				Palette, normalsPalette, shadowPalette, newAlpha, Tint, TintModifiers, depthOffset);
 		}
 
 		public IModifyableRenderable WithTint(in Vector3 newTint, TintModifiers newTintModifiers)
@@ -113,7 +127,7 @@ namespace OpenRA.Mods.Cnc.Graphics
 			return new ModelRenderable(
 				renderer, models, Pos, ZOffset, camera, scale,
 				lightSource, lightAmbientColor, lightDiffuseColor,
-				Palette, normalsPalette, shadowPalette, Alpha, newTint, newTintModifiers);
+				Palette, normalsPalette, shadowPalette, Alpha, newTint, newTintModifiers, depthOffset);
 		}
 
 		public IFinalizedRenderable PrepareRender(WorldRenderer wr)
@@ -178,7 +192,10 @@ namespace OpenRA.Mods.Cnc.Graphics
 					a *= -1;
 
 				wrsr.DrawSprite(renderProxy.ShadowSprite, sa, sb, sc, sd, t, a);
-				wrsr.DrawSprite(renderProxy.Sprite, pxOrigin - 0.5f * renderProxy.Sprite.Size, 1f, t, a);
+
+				// Depth follows world Y, so moving towards the camera only changes the sprite's depth.
+				var depth = (float)map.Rules.TerrainInfo.TileSize.Height * model.depthOffset.Length / map.Grid.TileScale;
+				wrsr.DrawSprite(renderProxy.Sprite, pxOrigin + new Vector3(0, 0, depth) - 0.5f * renderProxy.Sprite.Size, 1f, t, a);
 			}
 
 			public void RenderDebugGeometry(WorldRenderer wr)
