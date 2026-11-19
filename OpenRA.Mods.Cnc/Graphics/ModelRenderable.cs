@@ -132,7 +132,10 @@ namespace OpenRA.Mods.Cnc.Graphics
 				var draw = model.models.Where(v => v.IsVisible);
 
 				var map = wr.World.Map;
-				var groundOrientation = map.TerrainOrientation(map.CellContaining(model.Pos));
+
+				// Flying actors cast a flat shadow, so it does not snap to each ramp they pass over.
+				var groundOrientation = map.DistanceAboveTerrain(model.Pos).Length >= ShadowGround.FlatShadowAltitude
+					? WRot.None : map.TerrainOrientation(map.CellContaining(model.Pos));
 				renderProxy = model.renderer.RenderAsync(
 					wr, draw, model.camera, model.scale, groundOrientation, model.lightSource,
 					model.lightAmbientColor, model.lightDiffuseColor,
@@ -142,7 +145,7 @@ namespace OpenRA.Mods.Cnc.Graphics
 			public void Render(WorldRenderer wr)
 			{
 				var map = wr.World.Map;
-				var groundPos = model.Pos - new WVec(0, 0, map.DistanceAboveTerrain(model.Pos).Length);
+				var groundPos = new WPos(model.Pos.X, model.Pos.Y, ShadowGround.Height(map, model.Pos));
 				var groundZ = (float)map.Rules.TerrainInfo.TileSize.Height * (groundPos.Z - model.Pos.Z) / map.Grid.TileScale;
 				var pxOrigin = wr.Screen3DPosition(model.Pos);
 
@@ -180,7 +183,7 @@ namespace OpenRA.Mods.Cnc.Graphics
 
 			public void RenderDebugGeometry(WorldRenderer wr)
 			{
-				var groundPos = model.Pos - new WVec(0, 0, wr.World.Map.DistanceAboveTerrain(model.Pos).Length);
+				var groundPos = new WPos(model.Pos.X, model.Pos.Y, ShadowGround.Height(wr.World.Map, model.Pos));
 				var groundZ = wr.World.Map.Rules.TerrainInfo.TileSize.Height * (groundPos.Z - model.Pos.Z) / 1024f;
 				var pxOrigin = wr.Screen3DPosition(model.Pos);
 				var shadowOrigin = pxOrigin - groundZ * new Vector3(renderProxy.ShadowDirection, 1, 0);
@@ -290,6 +293,48 @@ namespace OpenRA.Mods.Cnc.Graphics
 
 				return (Rectangle.FromLTRB((int)minX, (int)minY, (int)maxX, (int)maxY), new Vector2(minZ, maxZ));
 			}
+		}
+	}
+
+	/// <summary>
+	/// The ground height a model's shadow is drawn at. Near the ground it is the terrain under the model.
+	/// Higher up it blends into a height interpolated between the terrain at the corners of a fixed
+	/// lattice around the model, so a flying actor's shadow glides over cliffs and ramps instead of
+	/// jumping each time the cell beneath it changes.
+	/// </summary>
+	public static class ShadowGround
+	{
+		public const int FlatShadowAltitude = 512;
+		public const int SmoothingAltitude = 1024;
+		const int LatticeSpacing = 1024;
+
+		public static int Height(Map map, WPos pos)
+		{
+			return Height(p => p.Z - map.DistanceAboveTerrain(p).Length, pos);
+		}
+
+		/// <summary>Shadow ground height for <paramref name="pos"/>, given the terrain height under any position.</summary>
+		/// <param name="groundHeightAt">Terrain height directly under a position.</param>
+		/// <param name="pos">Position of the model.</param>
+		public static int Height(Func<WPos, int> groundHeightAt, WPos pos)
+		{
+			var exact = groundHeightAt(pos);
+			var altitude = pos.Z - exact;
+			if (altitude <= 0)
+				return exact;
+
+			var x0 = (int)Math.Floor(pos.X / (double)LatticeSpacing) * LatticeSpacing;
+			var y0 = (int)Math.Floor(pos.Y / (double)LatticeSpacing) * LatticeSpacing;
+			var fx = (pos.X - x0) / (float)LatticeSpacing;
+			var fy = (pos.Y - y0) / (float)LatticeSpacing;
+
+			float H(int dx, int dy) => groundHeightAt(new WPos(x0 + dx, y0 + dy, pos.Z));
+			var north = H(0, 0) + (H(LatticeSpacing, 0) - H(0, 0)) * fx;
+			var south = H(0, LatticeSpacing) + (H(LatticeSpacing, LatticeSpacing) - H(0, LatticeSpacing)) * fx;
+			var smooth = north + (south - north) * fy;
+
+			var w = Math.Min(1f, altitude / (float)SmoothingAltitude);
+			return (int)Math.Round(exact + (smooth - exact) * w);
 		}
 	}
 }
