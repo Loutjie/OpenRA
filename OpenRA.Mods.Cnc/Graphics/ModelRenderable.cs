@@ -145,7 +145,7 @@ namespace OpenRA.Mods.Cnc.Graphics
 			public void Render(WorldRenderer wr)
 			{
 				var map = wr.World.Map;
-				var groundPos = new WPos(model.Pos.X, model.Pos.Y, ShadowGround.Height(map, model.Pos));
+				var groundPos = new WPos(model.Pos.X, model.Pos.Y, ShadowGround.Height(map, model.Pos, renderProxy.ShadowDirection));
 				var groundZ = (float)map.Rules.TerrainInfo.TileSize.Height * (groundPos.Z - model.Pos.Z) / map.Grid.TileScale;
 				var pxOrigin = wr.Screen3DPosition(model.Pos);
 
@@ -183,7 +183,7 @@ namespace OpenRA.Mods.Cnc.Graphics
 
 			public void RenderDebugGeometry(WorldRenderer wr)
 			{
-				var groundPos = new WPos(model.Pos.X, model.Pos.Y, ShadowGround.Height(wr.World.Map, model.Pos));
+				var groundPos = new WPos(model.Pos.X, model.Pos.Y, ShadowGround.Height(wr.World.Map, model.Pos, renderProxy.ShadowDirection));
 				var groundZ = wr.World.Map.Rules.TerrainInfo.TileSize.Height * (groundPos.Z - model.Pos.Z) / 1024f;
 				var pxOrigin = wr.Screen3DPosition(model.Pos);
 				var shadowOrigin = pxOrigin - groundZ * new Vector3(renderProxy.ShadowDirection, 1, 0);
@@ -297,32 +297,77 @@ namespace OpenRA.Mods.Cnc.Graphics
 	}
 
 	/// <summary>
-	/// The ground height a model's shadow is drawn at. Near the ground it is the terrain under the model.
-	/// Higher up it blends into a height interpolated between the terrain at the corners of a fixed
-	/// lattice around the model, so a flying actor's shadow glides over cliffs and ramps instead of
-	/// jumping each time the cell beneath it changes.
+	/// The height a model's shadow is drawn at. The shadow falls along a ray from the model, so the
+	/// height is taken where that ray meets the ground, not under the model. Near the ground the
+	/// terrain is used as is. Higher up it blends into terrain interpolated between the corners of a
+	/// fixed lattice, so a flying actor's shadow slides over cliffs and ramps instead of jumping.
 	/// </summary>
 	public static class ShadowGround
 	{
 		public const int FlatShadowAltitude = 512;
 		public const int SmoothingAltitude = 1024;
-		const int LatticeSpacing = 1024;
+		const int LatticeSpacing = 2048;
+		const int RayStep = 64;
+		const int MaxRaySteps = 512;
+		const int BisectionSteps = 6;
 
-		public static int Height(Map map, WPos pos)
+		/// <summary>Shadow height for a model at <paramref name="pos"/> on <paramref name="map"/>.</summary>
+		/// <param name="map">The map the model is on.</param>
+		/// <param name="pos">Position of the model.</param>
+		/// <param name="shadowDirection">Screen x offset of the shadow per screen pixel it drops.</param>
+		public static int Height(Map map, WPos pos, float shadowDirection)
 		{
-			return Height(p => p.Z - map.DistanceAboveTerrain(p).Length, pos);
+			var tileSize = map.Rules.TerrainInfo.TileSize;
+			var xPerDrop = shadowDirection * tileSize.Height / tileSize.Width;
+			return Height(p => p.Z - map.DistanceAboveTerrain(p).Length, pos, xPerDrop);
 		}
 
-		/// <summary>Shadow ground height for <paramref name="pos"/>, given the terrain height under any position.</summary>
+		/// <summary>Shadow height for a model at <paramref name="pos"/>, given the terrain height under any position.</summary>
 		/// <param name="groundHeightAt">Terrain height directly under a position.</param>
 		/// <param name="pos">Position of the model.</param>
-		public static int Height(Func<WPos, int> groundHeightAt, WPos pos)
+		/// <param name="xPerDrop">World X the shadow moves for each world unit it drops.</param>
+		public static int Height(Func<WPos, int> groundHeightAt, WPos pos, float xPerDrop)
 		{
 			var exact = groundHeightAt(pos);
 			var altitude = pos.Z - exact;
 			if (altitude <= 0)
 				return exact;
 
+			var w = Math.Min(1f, altitude / (float)SmoothingAltitude);
+
+			// Ground height under the shadow ray after it has dropped by t.
+			float Surface(float t)
+			{
+				var p = new WPos(pos.X + (int)Math.Round(xPerDrop * t), pos.Y, pos.Z);
+				var e = groundHeightAt(p);
+				return e + (Smoothed(groundHeightAt, p) - e) * w;
+			}
+
+			if (pos.Z <= Surface(0))
+				return pos.Z;
+
+			float above = 0;
+			float below = RayStep;
+			for (var i = 0; i < MaxRaySteps && pos.Z - below > Surface(below); i++)
+			{
+				above = below;
+				below += RayStep;
+			}
+
+			for (var i = 0; i < BisectionSteps; i++)
+			{
+				var mid = (above + below) / 2;
+				if (pos.Z - mid > Surface(mid))
+					above = mid;
+				else
+					below = mid;
+			}
+
+			return (int)Math.Round(pos.Z - below);
+		}
+
+		static float Smoothed(Func<WPos, int> groundHeightAt, WPos pos)
+		{
 			var x0 = (int)Math.Floor(pos.X / (double)LatticeSpacing) * LatticeSpacing;
 			var y0 = (int)Math.Floor(pos.Y / (double)LatticeSpacing) * LatticeSpacing;
 			var fx = (pos.X - x0) / (float)LatticeSpacing;
@@ -331,10 +376,7 @@ namespace OpenRA.Mods.Cnc.Graphics
 			float H(int dx, int dy) => groundHeightAt(new WPos(x0 + dx, y0 + dy, pos.Z));
 			var north = H(0, 0) + (H(LatticeSpacing, 0) - H(0, 0)) * fx;
 			var south = H(0, LatticeSpacing) + (H(LatticeSpacing, LatticeSpacing) - H(0, LatticeSpacing)) * fx;
-			var smooth = north + (south - north) * fy;
-
-			var w = Math.Min(1f, altitude / (float)SmoothingAltitude);
-			return (int)Math.Round(exact + (smooth - exact) * w);
+			return north + (south - north) * fy;
 		}
 	}
 }
